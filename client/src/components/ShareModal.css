@@ -1,0 +1,104 @@
+.share-modal-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  padding: 8px 0;
+}
+
+.qr-code-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.qr-code-image {
+  width: 200px;
+  height: 200px;
+  border: 2px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 12px;
+  background: white;
+}
+
+.qr-code-hint {
+  font-size: 14px;
+  color: #666;
+  margin: 0;
+}
+
+.room-id-display {
+  width: 100%;
+  background: #f5f5f5;
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+}
+
+.room-id-text {
+  font-family: monospace;
+  font-size: 16px;
+  color: #333;
+  word-break: break-all;
+  font-weight: 600;
+}
+
+.share-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.share-btn {
+  padding: 16px 24px;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.share-btn:active {
+  transform: scale(0.98);
+}
+
+.share-btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.share-btn-primary:active {
+  background: linear-gradient(135deg, #5568d3 0%, #6a3d8f 100%);
+}
+
+.share-btn-secondary {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.share-btn-secondary:active {
+  background: #e0e0e0;
+}
+
+.share-hint {
+  font-size: 14px;
+  color: #666;
+  text-align: center;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .qr-code-image {
+    width: 180px;
+    height: 180px;
+  }
+}
+
