@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import BottomSheet from './BottomSheet';
 import { useHaptic } from '@/hooks/useHaptic';
@@ -8,24 +8,61 @@ export default function QRScanner({ isOpen, onClose, onScanSuccess }) {
   const scannerRef = useRef(null);
   const html5QrCodeRef = useRef(null);
   const scannerIdRef = useRef(`qr-scanner-${Date.now()}`);
+  const isRunningRef = useRef(false);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState('');
   const [retryKey, setRetryKey] = useState(0);
   const haptic = useHaptic();
 
+  // Safe stop function
+  const safeStop = useCallback(async (scanner) => {
+    if (!scanner || !isRunningRef.current) return;
+    try {
+      await scanner.stop();
+      isRunningRef.current = false;
+    } catch (err) {
+      // Ignore errors if scanner is not running
+      const errMsg = err?.message || String(err);
+      if (errMsg && !errMsg.includes('not running') && !errMsg.includes('not paused')) {
+        console.warn('Scanner stop error:', err);
+      }
+      isRunningRef.current = false;
+    }
+    try {
+      await scanner.clear();
+    } catch (err) {
+      // Ignore clear errors
+    }
+  }, []);
+
   useEffect(() => {
-    if (!isOpen || !scannerRef.current) return;
+    if (!isOpen) return;
 
     let html5QrCode = null;
     let isMounted = true;
 
     const startScanning = async () => {
+      // Wait for DOM element to be ready
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      if (!isMounted || !scannerRef.current) return;
+
       try {
-        if (!isMounted) return;
         setError('');
         setIsScanning(true);
+        isRunningRef.current = false;
 
-        html5QrCode = new Html5Qrcode(scannerRef.current.id);
+        // Clear any existing scanner
+        if (html5QrCodeRef.current) {
+          await safeStop(html5QrCodeRef.current);
+        }
+
+        const elementId = scannerRef.current.id;
+        if (!elementId) {
+          throw new Error('Scanner element ID not found');
+        }
+
+        html5QrCode = new Html5Qrcode(elementId);
         html5QrCodeRef.current = html5QrCode;
 
         await html5QrCode.start(
@@ -40,9 +77,8 @@ export default function QRScanner({ isOpen, onClose, onScanSuccess }) {
             // Success callback
             if (!isMounted) return;
             haptic.success();
-            if (html5QrCode) {
-              html5QrCode.stop().then(() => {
-                html5QrCode.clear().catch(() => {});
+            if (html5QrCode && isRunningRef.current) {
+              safeStop(html5QrCode).then(() => {
                 if (isMounted) {
                   setIsScanning(false);
                   onScanSuccess(decodedText);
@@ -61,11 +97,15 @@ export default function QRScanner({ isOpen, onClose, onScanSuccess }) {
             // Error callback - ignore, it's just scanning
           }
         );
+        
+        // Mark as running after successful start
+        isRunningRef.current = true;
       } catch (err) {
         console.error('QR Scanner error:', err);
         if (isMounted) {
           setError('Failed to start camera. Please check permissions.');
           setIsScanning(false);
+          isRunningRef.current = false;
           haptic.error();
         }
       }
@@ -76,17 +116,15 @@ export default function QRScanner({ isOpen, onClose, onScanSuccess }) {
     return () => {
       isMounted = false;
       if (html5QrCode) {
-        html5QrCode.stop().catch(() => {});
-        html5QrCode.clear().catch(() => {});
+        safeStop(html5QrCode);
       }
       html5QrCodeRef.current = null;
     };
-  }, [isOpen, retryKey, onScanSuccess, onClose, haptic]);
+  }, [isOpen, retryKey, onScanSuccess, onClose, haptic, safeStop]);
 
-  const handleClose = () => {
+  const handleClose = async () => {
     if (html5QrCodeRef.current) {
-      html5QrCodeRef.current.stop().catch(() => {});
-      html5QrCodeRef.current.clear().catch(() => {});
+      await safeStop(html5QrCodeRef.current);
     }
     setIsScanning(false);
     onClose();
