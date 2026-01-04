@@ -9,6 +9,10 @@ import ShareModal from "@/components/ShareModal";
 import QueueManager from "@/components/QueueManager";
 import ToastContainer from "@/components/ToastContainer";
 import BottomSheet from "@/components/BottomSheet";
+import PlayIcon from "@/components/icons/PlayIcon";
+import PauseIcon from "@/components/icons/PauseIcon";
+import NextIcon from "@/components/icons/NextIcon";
+import PrevIcon from "@/components/icons/PrevIcon";
 import "./Room.css";
 
 export default function Room() {
@@ -22,6 +26,7 @@ export default function Room() {
   const [_room, setRoom] = useState(null);
   const [selectedSong, setSelectedSong] = useState(null);
   const [userInteracted, setUserInteracted] = useState(false);
+  const [audioReady, setAudioReady] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState("");
@@ -88,9 +93,14 @@ export default function Room() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
+  // Handle user interaction
+  const handleUserInteraction = useCallback(() => {
+    setUserInteracted(true);
+  }, []);
+
   // Safe play function
   const safePlay = useCallback(async () => {
-    if (!userInteracted || !audioRef.current) return;
+    if (!audioRef.current) return;
     try {
       audioRef.current.volume = volume / 100;
       audioRef.current.muted = false;
@@ -98,9 +108,9 @@ export default function Room() {
       setIsPlaying(true);
       haptic.light();
     } catch (err) {
-      console.warn("Playback blocked until user interacts", err);
+      console.warn("Playback error:", err);
     }
-  }, [userInteracted, volume, haptic]);
+  }, [volume, haptic]);
 
   // Keep refs in sync - must be after safePlay and addToast are defined
   useEffect(() => {
@@ -203,14 +213,39 @@ export default function Room() {
   }, [isHost, roomId, haptic]);
 
   // Play / Pause buttons
-  const play = () => {
-    if (!isHost || !selectedSong || !audioRef.current?.src) return;
+  const play = useCallback(async () => {
+    if (!isHost || !selectedSong || !audioRef.current) return;
+    
+    // Ensure audio is loaded
+    if (!audioReady && audioRef.current.readyState < 2) {
+      await new Promise((resolve) => {
+        if (audioRef.current.readyState >= 2) {
+          resolve();
+        } else {
+          const handler = () => {
+            audioRef.current.removeEventListener('canplay', handler);
+            resolve();
+          };
+          audioRef.current.addEventListener('canplay', handler);
+        }
+      });
+      setAudioReady(true);
+    }
+    
+    if (!audioRef.current.src) return;
+    
     const time = audioRef.current.currentTime;
     socket.emit("HOST_PLAY", { roomId, time });
-    safePlay();
-  };
+    
+    try {
+      await safePlay();
+    } catch (err) {
+      console.error("Play error:", err);
+      addToast("Failed to play. Please try again.", "error");
+    }
+  }, [isHost, selectedSong, audioReady, roomId, safePlay, addToast]);
 
-  const pause = () => {
+  const pause = useCallback(() => {
     if (!isHost || !audioRef.current?.src) return;
     const time = audioRef.current.currentTime;
     socket.emit("HOST_PAUSE", { roomId, time });
@@ -219,7 +254,7 @@ export default function Room() {
       setIsPlaying(false);
     }
     haptic.light();
-  };
+  }, [isHost, roomId, haptic]);
 
   // Volume change
   const handleVolumeChange = (newVolume) => {
@@ -448,6 +483,7 @@ export default function Room() {
 
     const src = `${SOCKET_URL}${selectedSong.url}`;
     if (audioRef.current.src !== src) {
+      setAudioReady(false);
       audioRef.current.src = src;
       audioRef.current.currentTime = 0;
       audioRef.current.volume = volume / 100;
@@ -456,6 +492,29 @@ export default function Room() {
       setIsPlaying(false);
     }
   }, [selectedSong, volume]);
+
+  // Add audio ready event listener
+  useEffect(() => {
+    if (!audioRef.current) return;
+    
+    const audio = audioRef.current;
+    
+    const handleCanPlay = () => {
+      setAudioReady(true);
+    };
+    
+    const handleLoadStart = () => {
+      setAudioReady(false);
+    };
+    
+    audio.addEventListener('canplay', handleCanPlay);
+    audio.addEventListener('loadstart', handleLoadStart);
+    
+    return () => {
+      audio.removeEventListener('canplay', handleCanPlay);
+      audio.removeEventListener('loadstart', handleLoadStart);
+    };
+  }, [selectedSong]);
 
   // Seek handler
   const handleSeek = (e) => {
@@ -478,19 +537,19 @@ export default function Room() {
           ← Back
         </button>
         <div className="room-info">
-          <h1 className="room-title">🎵 Room</h1>
+          <h1 className="room-title">Room</h1>
           <div className="room-id-section">
             <code className="room-id">{roomId}</code>
-            <button 
-              className="btn-share" 
-              onClick={() => setShowShareModal(true)}
-              title="Share Room"
-            >
-              📤 Share
-            </button>
+        <button 
+          className="btn-share" 
+          onClick={() => setShowShareModal(true)}
+          title="Share Room"
+        >
+          Share
+        </button>
           </div>
           <div className="room-header-actions">
-            {isHost && <span className="host-badge">👑 Host</span>}
+            {isHost && <span className="host-badge">Host</span>}
             <UserList users={users} isHost={isHost} />
           </div>
         </div>
@@ -502,12 +561,52 @@ export default function Room() {
         className="player-section"
         ref={playerRef}
         {...swipeHandlers}
-        onClick={() => setUserInteracted(true)}
+        onClick={handleUserInteraction}
       >
         {selectedSong ? (
           <>
             <div className="now-playing">
               <h2 className="song-title">{selectedSong.title}</h2>
+              
+              {/* Desktop Player Controls */}
+              <div className="player-controls">
+                <button
+                  className="control-btn control-btn-prev"
+                  onClick={handlePrev}
+                  disabled={!isHost || queuePosition === 0}
+                  aria-label="Previous"
+                >
+                  <PrevIcon size={20} />
+                </button>
+                {isPlaying ? (
+                  <button
+                    className="control-btn control-btn-primary"
+                    onClick={pause}
+                    disabled={!isHost || !selectedSong}
+                    aria-label="Pause"
+                  >
+                    <PauseIcon size={28} />
+                  </button>
+                ) : (
+                  <button
+                    className="control-btn control-btn-primary"
+                    onClick={play}
+                    disabled={!isHost || !selectedSong}
+                    aria-label="Play"
+                  >
+                    <PlayIcon size={28} />
+                  </button>
+                )}
+                <button
+                  className="control-btn control-btn-next"
+                  onClick={handleNext}
+                  disabled={!isHost || queuePosition >= queue.length - 1}
+                  aria-label="Next"
+                >
+                  <NextIcon size={20} />
+                </button>
+              </div>
+              
               <div className="progress-container">
                 <input
                   type="range"
@@ -527,7 +626,7 @@ export default function Room() {
 
             {!isHost && (
               <p className="listener-note">
-                {isPlaying ? "▶️ Playing..." : "⏸️ Paused"}
+                {isPlaying ? "Playing..." : "Paused"}
               </p>
             )}
           </>
@@ -549,7 +648,7 @@ export default function Room() {
             disabled={!isHost || queuePosition === 0}
             aria-label="Previous"
           >
-            ⏮
+            <PrevIcon size={24} />
           </button>
           {isPlaying ? (
             <button
@@ -558,7 +657,7 @@ export default function Room() {
               disabled={!isHost || !selectedSong}
               aria-label="Pause"
             >
-              ⏸
+              <PauseIcon size={28} color="white" />
             </button>
           ) : (
             <button
@@ -567,7 +666,7 @@ export default function Room() {
               disabled={!isHost || !selectedSong}
               aria-label="Play"
             >
-              ▶
+              <PlayIcon size={28} color="white" />
             </button>
           )}
           <button
@@ -576,7 +675,7 @@ export default function Room() {
             disabled={!isHost || queuePosition >= queue.length - 1}
             aria-label="Next"
           >
-            ⏭
+            <NextIcon size={24} />
           </button>
         </div>
         <div className="mobile-controls-row">
@@ -590,12 +689,12 @@ export default function Room() {
           className="queue-toggle-btn"
           onClick={() => setShowQueueSheet(true)}
         >
-          📋 Queue ({queue.length})
+          Queue ({queue.length})
         </button>
       </div>
 
       <div className="songs-section">
-        <h3 className="section-title">🎶 Songs</h3>
+        <h3 className="section-title">Songs</h3>
         {songs.length === 0 ? (
           <p className="empty-state">No songs yet. Upload one to get started!</p>
         ) : (
@@ -619,8 +718,9 @@ export default function Room() {
                   className="song-add-queue-btn"
                   onClick={() => addToQueue(song)}
                   title="Add to queue"
+                  aria-label="Add to queue"
                 >
-                  ➕
+                  +
                 </button>
               </div>
             ))}
@@ -629,7 +729,7 @@ export default function Room() {
       </div>
 
       <div className="upload-section">
-        <h3 className="section-title">📤 Upload Song</h3>
+        <h3 className="section-title">Upload Song</h3>
         <div className="upload-area">
           <input
             ref={fileInputRef}
