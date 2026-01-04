@@ -27,6 +27,7 @@ export default function Room() {
   const [selectedSong, setSelectedSong] = useState(null);
   const [userInteracted, setUserInteracted] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
+  const [latestHostTime, setLatestHostTime] = useState(0);
   const [isHost, setIsHost] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState("");
@@ -93,11 +94,6 @@ export default function Room() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Handle user interaction
-  const handleUserInteraction = useCallback(() => {
-    setUserInteracted(true);
-  }, []);
-
   // Safe play function
   const safePlay = useCallback(async () => {
     if (!audioRef.current) return;
@@ -111,6 +107,98 @@ export default function Room() {
       console.warn("Playback error:", err);
     }
   }, [volume, haptic]);
+
+  // Sync playback function for non-host users
+  const syncPlayback = useCallback(async (roomState) => {
+    if (!audioRef.current || !roomState) return;
+    
+    if (audioRef.current.src) {
+      // Wait for audio to be ready
+      if (audioRef.current.readyState < 2) {
+        await new Promise((resolve) => {
+          const handler = () => {
+            audioRef.current.removeEventListener('canplay', handler);
+            resolve();
+          };
+          audioRef.current.addEventListener('canplay', handler);
+        });
+      }
+      
+      // Sync time and volume
+      audioRef.current.currentTime = roomState.currentTime || 0;
+      audioRef.current.volume = (roomState.volume || 100) / 100;
+      setCurrentTime(roomState.currentTime || 0);
+      
+      // Start playback if room is playing
+      // If user has interacted, autoplay will work
+      if (roomState.isPlaying) {
+        if (userInteractedRef.current) {
+          try {
+            await audioRef.current.play();
+            setIsPlaying(true);
+          } catch (err) {
+            console.warn('Sync playback error:', err);
+            setIsPlaying(true); // Show as playing in UI
+          }
+        } else {
+          // User hasn't interacted yet - set state but don't play
+          setIsPlaying(true);
+        }
+      } else {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      }
+    }
+  }, []);
+
+  // Handle user interaction - enables autoplay
+  const handleUserInteraction = useCallback(async (e) => {
+    // Don't interfere with button clicks or interactive elements
+    if (e.target.tagName === 'BUTTON' || e.target.closest('button')) {
+      return;
+    }
+    
+    if (!userInteracted) {
+      setUserInteracted(true);
+      userInteractedRef.current = true;
+      haptic.light();
+      
+      // If room is playing and we have a song, sync to host's CURRENT real-time position
+      if (!isHost && _room && selectedSong && audioRef.current?.src) {
+        // Request current time from host to get real-time position
+        socket.emit("REQUEST_CURRENT_TIME", { roomId });
+        
+        // Wait for audio to be ready
+        if (audioRef.current.readyState < 2) {
+          await new Promise((resolve) => {
+            const handler = () => {
+              audioRef.current.removeEventListener('canplay', handler);
+              resolve();
+            };
+            audioRef.current.addEventListener('canplay', handler);
+          });
+        }
+        
+        // Use latest host time (from TIME_SYNC updates) or fallback to room state
+        // Wait a bit for the response, then use the most recent time
+        const hostTime = latestHostTime || _room.currentTime || 0;
+        audioRef.current.currentTime = hostTime;
+        audioRef.current.volume = (_room.volume || 100) / 100;
+        setCurrentTime(hostTime);
+        
+        // Start playback if room is playing
+        if (_room.isPlaying) {
+          try {
+            await audioRef.current.play();
+            setIsPlaying(true);
+          } catch (err) {
+            console.warn('Autoplay error:', err);
+            setIsPlaying(true); // Show as playing in UI
+          }
+        }
+      }
+    }
+  }, [userInteracted, isHost, _room, selectedSong, haptic, roomId, latestHostTime]);
 
   // Keep refs in sync - must be after safePlay and addToast are defined
   useEffect(() => {
@@ -214,36 +302,71 @@ export default function Room() {
 
   // Play / Pause buttons
   const play = useCallback(async () => {
-    if (!isHost || !selectedSong || !audioRef.current) return;
+    // Set user interacted on play button click (required for autoplay)
+    setUserInteracted(true);
+    userInteractedRef.current = true;
     
-    // Ensure audio is loaded
-    if (!audioReady && audioRef.current.readyState < 2) {
-      await new Promise((resolve) => {
-        if (audioRef.current.readyState >= 2) {
-          resolve();
-        } else {
-          const handler = () => {
-            audioRef.current.removeEventListener('canplay', handler);
+    if (!selectedSong || !audioRef.current) return;
+    
+    if (isHost) {
+      // Host controls - emit to server
+      // Ensure audio is loaded
+      if (!audioReady && audioRef.current.readyState < 2) {
+        await new Promise((resolve) => {
+          if (audioRef.current.readyState >= 2) {
             resolve();
-          };
-          audioRef.current.addEventListener('canplay', handler);
-        }
-      });
-      setAudioReady(true);
+          } else {
+            const handler = () => {
+              audioRef.current.removeEventListener('canplay', handler);
+              resolve();
+            };
+            audioRef.current.addEventListener('canplay', handler);
+          }
+        });
+        setAudioReady(true);
+      }
+      
+      if (!audioRef.current.src) return;
+      
+      const time = audioRef.current.currentTime;
+      socket.emit("HOST_PLAY", { roomId, time });
+      
+      try {
+        await safePlay();
+      } catch (err) {
+        console.error("Play error:", err);
+        addToast("Failed to play. Please try again.", "error");
+      }
+    } else {
+      // Non-host: sync to host's CURRENT real-time position and play locally
+      if (!audioRef.current.src) return;
+      
+      // Request current time from host to get real-time position (not stale room state)
+      socket.emit("REQUEST_CURRENT_TIME", { roomId });
+      
+      // Wait a moment for the response
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      // Get current room state
+      const currentRoom = _room;
+      if (currentRoom) {
+        // Use latest host time (from TIME_SYNC updates) or fallback to room state
+        const hostTime = latestHostTime || currentRoom.currentTime || 0;
+        audioRef.current.currentTime = hostTime;
+        audioRef.current.volume = (currentRoom.volume || 100) / 100;
+        setCurrentTime(hostTime);
+      }
+      
+      try {
+        await audioRef.current.play();
+        setIsPlaying(true);
+        haptic.light();
+      } catch (err) {
+        console.error("Play error:", err);
+        addToast("Failed to play. Please try again.", "error");
+      }
     }
-    
-    if (!audioRef.current.src) return;
-    
-    const time = audioRef.current.currentTime;
-    socket.emit("HOST_PLAY", { roomId, time });
-    
-    try {
-      await safePlay();
-    } catch (err) {
-      console.error("Play error:", err);
-      addToast("Failed to play. Please try again.", "error");
-    }
-  }, [isHost, selectedSong, audioReady, roomId, safePlay, addToast]);
+  }, [isHost, selectedSong, audioReady, roomId, safePlay, addToast, _room, haptic, latestHostTime]);
 
   const pause = useCallback(() => {
     if (!isHost || !audioRef.current?.src) return;
@@ -267,7 +390,7 @@ export default function Room() {
     haptic.light();
   };
 
-  // Update progress
+  // Update progress and sync time (host sends updates, non-host syncs)
   useEffect(() => {
     if (!audioRef.current) return;
 
@@ -275,6 +398,14 @@ export default function Room() {
       if (audioRef.current) {
         setCurrentTime(audioRef.current.currentTime);
         setDuration(audioRef.current.duration || 0);
+        
+        // Host: periodically send time updates to keep non-host users in sync
+        if (isHost && isPlaying && roomId) {
+          socket.emit("HOST_TIME_UPDATE", { 
+            roomId, 
+            time: audioRef.current.currentTime 
+          });
+        }
       }
     };
 
@@ -296,7 +427,7 @@ export default function Room() {
       audio.removeEventListener("loadedmetadata", updateProgress);
       audio.removeEventListener("ended", handleEnded);
     };
-  }, [selectedSong, queue, queuePosition, isHost, roomId]);
+  }, [selectedSong, queue, queuePosition, isHost, roomId, isPlaying]);
 
   // Socket listeners
   useEffect(() => {
@@ -315,14 +446,22 @@ export default function Room() {
       setQueue(roomState.queue || []);
       setQueuePosition(roomState.queuePosition || 0);
       setUsers(roomState.users || []);
+      setCurrentTime(roomState.currentTime || 0);
+      setIsPlaying(roomState.isPlaying || false);
 
-      // Update selected song based on room state
-      // This will be handled after songs are loaded via SONG_LIST
+      // Update selected song and handle playback sync
       setSongs((prevSongs) => {
         if (roomState.songId && prevSongs.length > 0) {
           const songObj = prevSongs.find((s) => s.id === roomState.songId);
           if (songObj) {
             setSelectedSong(songObj);
+            // If song is playing, sync playback after song is set
+            // Note: Actual playback will only start if user has interacted
+            if (roomState.isPlaying && roomState.hostId !== socket.id) {
+              setTimeout(() => {
+                syncPlayback(roomState);
+              }, 100);
+            }
           } else if (prevSongs.length > 0 && roomState.hostId === socket.id) {
             const firstSong = prevSongs[0];
             setSelectedSong(firstSong);
@@ -348,12 +487,20 @@ export default function Room() {
         return list;
       });
       
-      // Update selected song if room state has a songId
+      // Update selected song and sync playback if needed
       setRoom((currentRoom) => {
         if (currentRoom?.songId && list.length > 0) {
           const songObj = list.find((s) => s.id === currentRoom.songId);
           if (songObj) {
             setSelectedSong(songObj);
+            // If room is playing, sync playback after song is loaded
+            // Note: Actual playback will only start if user has interacted
+            const currentIsHost = currentRoom.hostId === socket.id;
+            if (currentRoom.isPlaying && !currentIsHost) {
+              setTimeout(() => {
+                syncPlayback(currentRoom);
+              }, 200);
+            }
           }
         }
         return currentRoom;
@@ -373,11 +520,17 @@ export default function Room() {
       setRoom(roomState);
       setIsPlaying(true);
       setVolume(roomState.volume || 100);
+      setCurrentTime(roomState.currentTime || 0);
+      
       if (audioRef.current?.src) {
-        audioRef.current.currentTime = roomState.currentTime;
+        audioRef.current.currentTime = roomState.currentTime || 0;
         audioRef.current.volume = (roomState.volume || 100) / 100;
+        
+        // Try to play if user has interacted
         if (userInteractedRef.current && safePlayRef.current) {
-          safePlayRef.current();
+          safePlayRef.current().catch((err) => {
+            console.warn('Autoplay blocked:', err);
+          });
         }
       }
     };
@@ -385,8 +538,9 @@ export default function Room() {
     const handlePause = (roomState) => {
       setRoom(roomState);
       setIsPlaying(false);
+      setCurrentTime(roomState.currentTime || 0);
       if (audioRef.current?.src) {
-        audioRef.current.currentTime = roomState.currentTime;
+        audioRef.current.currentTime = roomState.currentTime || 0;
         audioRef.current.pause();
       }
     };
@@ -395,10 +549,25 @@ export default function Room() {
       setRoom(roomState);
       setQueue(roomState.queue || []);
       setQueuePosition(roomState.queuePosition || 0);
+      setIsPlaying(roomState.isPlaying || false);
+      
+      // Sync to host's current time
+      const hostTime = roomState.currentTime || 0;
+      setCurrentTime(hostTime);
+      
       setSongs((prevSongs) => {
         const songObj = prevSongs.find((s) => s.id === roomState.songId);
         if (songObj) {
           setSelectedSong(songObj);
+          // Sync audio time when song changes (for non-host users)
+          if (audioRef.current?.src && roomState.hostId !== socket.id) {
+            // Wait a bit for audio to load, then sync time
+            setTimeout(() => {
+              if (audioRef.current) {
+                audioRef.current.currentTime = hostTime;
+              }
+            }, 100);
+          }
         }
         return prevSongs;
       });
@@ -409,6 +578,26 @@ export default function Room() {
       if (audioRef.current) {
         audioRef.current.volume = (roomState.volume || 100) / 100;
       }
+    };
+
+    const handleTimeSync = ({ currentTime }) => {
+      // Store the latest host time for real-time sync
+      setLatestHostTime(currentTime);
+      
+      // Non-host: sync to host's current time periodically
+      if (!isHost && audioRef.current?.src && isPlaying) {
+        const timeDiff = Math.abs(audioRef.current.currentTime - currentTime);
+        // Only sync if difference is significant (>0.5s) to avoid jitter
+        if (timeDiff > 0.5) {
+          audioRef.current.currentTime = currentTime;
+          setCurrentTime(currentTime);
+        }
+      }
+    };
+
+    const handleCurrentTimeResponse = ({ currentTime }) => {
+      // Store the latest host time when requested
+      setLatestHostTime(currentTime);
     };
 
     const handleUpdateQueue = (roomState) => {
@@ -460,6 +649,8 @@ export default function Room() {
     socket.on("USER_JOINED", handleUserJoined);
     socket.on("USER_LEFT", handleUserLeft);
     socket.on("ROOM_ERROR", handleRoomError);
+    socket.on("TIME_SYNC", handleTimeSync);
+    socket.on("CURRENT_TIME_RESPONSE", handleCurrentTimeResponse);
 
     return () => {
       hasJoinedRoom.current = false;
@@ -474,8 +665,10 @@ export default function Room() {
       socket.off("USER_JOINED", handleUserJoined);
       socket.off("USER_LEFT", handleUserLeft);
       socket.off("ROOM_ERROR", handleRoomError);
+      socket.off("TIME_SYNC", handleTimeSync);
+      socket.off("CURRENT_TIME_RESPONSE", handleCurrentTimeResponse);
     };
-  }, [roomId, navigate]);
+  }, [roomId, navigate, syncPlayback, isHost, isPlaying]);
 
   // Effect to set audio src only when selectedSong changes
   useEffect(() => {
@@ -489,7 +682,7 @@ export default function Room() {
       audioRef.current.volume = volume / 100;
       audioRef.current.pause();
       setCurrentTime(0);
-      setIsPlaying(false);
+      // Don't reset isPlaying here - let room state control it
     }
   }, [selectedSong, volume]);
 
@@ -531,7 +724,18 @@ export default function Room() {
   };
 
   return (
-    <div className="room-container">
+    <div 
+      className="room-container"
+      onClick={handleUserInteraction}
+      style={{ cursor: userInteracted ? 'default' : 'pointer' }}
+    >
+      {!userInteracted && (
+        <div className="audio-enable-overlay">
+          <div className="audio-enable-prompt">
+            <p>Click anywhere to enable audio</p>
+          </div>
+        </div>
+      )}
       <div className="room-header">
         <button className="btn-back" onClick={() => navigate("/")}>
           ← Back
@@ -663,7 +867,7 @@ export default function Room() {
             <button
               className="mobile-control-btn mobile-control-btn-primary"
               onClick={play}
-              disabled={!isHost || !selectedSong}
+              disabled={!selectedSong}
               aria-label="Play"
             >
               <PlayIcon size={28} color="white" />

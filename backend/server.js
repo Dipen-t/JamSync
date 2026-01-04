@@ -198,6 +198,8 @@ io.on("connection", (socket) => {
     room.currentTime = time;
     room.updatedAt = Date.now();
     io.to(roomId).emit("PLAY", { ...room, users: roomUsers[roomId] || [] });
+    // Also send immediate time sync for real-time sync
+    socket.to(roomId).emit("TIME_SYNC", { currentTime: time });
   });
 
   socket.on("HOST_PAUSE", ({ roomId, time }) => {
@@ -207,6 +209,8 @@ io.on("connection", (socket) => {
     room.currentTime = time;
     room.updatedAt = Date.now();
     io.to(roomId).emit("PAUSE", { ...room, users: roomUsers[roomId] || [] });
+    // Also send immediate time sync for real-time sync
+    socket.to(roomId).emit("TIME_SYNC", { currentTime: time });
   });
 
   socket.on("CHANGE_SONG", ({ roomId, songId }) => {
@@ -230,6 +234,22 @@ io.on("connection", (socket) => {
     room.volume = volume;
     room.updatedAt = Date.now();
     io.to(roomId).emit("VOLUME_CHANGED", { ...room, users: roomUsers[roomId] || [] });
+  });
+
+  socket.on("HOST_TIME_UPDATE", ({ roomId, time }) => {
+    const room = rooms[roomId];
+    if (!room || room.hostId !== socket.id) return;
+    room.currentTime = time;
+    // Only emit to non-host users to avoid feedback loops
+    socket.to(roomId).emit("TIME_SYNC", { currentTime: time });
+  });
+
+  socket.on("REQUEST_CURRENT_TIME", ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    // Send current time from room state (updated by HOST_TIME_UPDATE)
+    // This should be fresh since host sends updates frequently
+    socket.emit("CURRENT_TIME_RESPONSE", { currentTime: room.currentTime || 0 });
   });
 
   socket.on("NEXT_SONG", ({ roomId }) => {
