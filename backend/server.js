@@ -14,10 +14,25 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
-app.use(cors());
+// CORS configuration - update with your frontend URL in production
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || "*",
+  credentials: true
+};
+app.use(cors(corsOptions));
 app.use(express.static("public"));
 
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    timestamp: new Date().toISOString(),
+    songs: songs.length,
+    rooms: Object.keys(rooms).length
+  });
+});
 
 // --- multer setup for uploads ---
 const storage = multer.diskStorage({
